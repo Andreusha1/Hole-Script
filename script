@@ -1,0 +1,1390 @@
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local GuiService = game:GetService("GuiService")
+local TeleportService = game:GetService("TeleportService")
+local HttpService = game:GetService("HttpService")
+local player = Players.LocalPlayer
+
+-- Upload this file as autofarm.lua to the main branch before enabling Auto Reconnect.
+local AUTOMATION_SCRIPT_URL = "https://raw.githubusercontent.com/Andreusha1/OnrushaHub/refs/heads/main/autofarm.lua"
+local TOGGLE_STATE_FILE = "onrusha_autofarm_state.json"
+
+local function getEnvironments()
+    local list = {}
+    if type(getgenv) == "function" then
+        local ok, env = pcall(getgenv)
+        if ok and type(env) == "table" then table.insert(list, env) end
+    end
+    if type(getfenv) == "function" then
+        local ok, env = pcall(getfenv, 0)
+        if ok and type(env) == "table" then table.insert(list, env) end
+    end
+    table.insert(list, _G)
+    return list
+end
+
+local SavedToggleState = {}
+local function loadToggleState()
+    for _, env in ipairs(getEnvironments()) do
+        if type(env.readfile) == "function" and type(env.isfile) == "function" then
+            local existsOK, exists = pcall(env.isfile, TOGGLE_STATE_FILE)
+            if existsOK and exists then
+                local readOK, contents = pcall(env.readfile, TOGGLE_STATE_FILE)
+                if readOK and type(contents) == "string" then
+                    local decodeOK, decoded = pcall(function() return HttpService:JSONDecode(contents) end)
+                    if decodeOK and type(decoded) == "table" then
+                        SavedToggleState = decoded
+                        return
+                    end
+                end
+            end
+        end
+        if type(env.OnrushaAutoFarmState) == "table" then
+            SavedToggleState = table.clone(env.OnrushaAutoFarmState)
+            return
+        end
+    end
+end
+
+loadToggleState()
+
+local function saveToggleState()
+    for _, env in ipairs(getEnvironments()) do
+        if type(env.writefile) == "function" then
+            pcall(env.writefile, TOGGLE_STATE_FILE, HttpService:JSONEncode(SavedToggleState))
+        end
+        pcall(function() env.OnrushaAutoFarmState = table.clone(SavedToggleState) end)
+    end
+end
+
+local function getToggleDefault(name, fallback)
+    local value = SavedToggleState[name]
+    if type(value) == "boolean" then return value end
+    return fallback == true
+end
+
+local function queueReloadOnTeleport()
+    if type(AUTOMATION_SCRIPT_URL) ~= "string"
+        or AUTOMATION_SCRIPT_URL == ""
+        or AUTOMATION_SCRIPT_URL:find("PASTE_RAW_URL", 1, true) then
+        warn("[Onrusha] Auto Reconnect: set AUTOMATION_SCRIPT_URL to this script's raw URL first")
+        return false
+    end
+
+    local queue
+    for _, env in ipairs(getEnvironments()) do
+        queue = env.queue_on_teleport or env.queueonteleport or env.queue_on_tp
+        if type(queue) ~= "function" and type(env.syn) == "table" then
+            queue = env.syn.queue_on_teleport
+        end
+        if type(queue) == "function" then break end
+    end
+
+    if type(queue) ~= "function" then
+        warn("[Onrusha] Auto Reconnect: queue_on_teleport API is unavailable")
+        return false
+    end
+
+    saveToggleState()
+    local queuedCode = string.format([[
+local HttpService = game:GetService("HttpService")
+local shouldRun = false
+if type(isfile) == "function" and type(readfile) == "function" then
+    local ok, content = pcall(readfile, %q)
+    if ok and type(content) == "string" then
+        local decodedOK, state = pcall(function() return HttpService:JSONDecode(content) end)
+        shouldRun = decodedOK and type(state) == "table" and state["Auto Reconnect"] == true
+    end
+end
+if not shouldRun and type(getgenv) == "function" then
+    local ok, env = pcall(getgenv)
+    shouldRun = ok and type(env) == "table" and type(env.OnrushaAutoFarmState) == "table" and env.OnrushaAutoFarmState["Auto Reconnect"] == true
+end
+if not shouldRun then return end
+local u = %q
+local ok, src = pcall(function() return game:HttpGet(u) end)
+if ok and type(src) == "string" then
+    local f = loadstring(src)
+    if type(f) == "function" then f() end
+end
+]], TOGGLE_STATE_FILE, AUTOMATION_SCRIPT_URL)
+    local ok, err = pcall(queue, queuedCode)
+    if not ok then warn("[Onrusha] Auto Reconnect queue failed:", err) end
+    return ok
+end
+
+local LIBRARY_URL = "https://raw.githubusercontent.com/Andreusha1/OnrushaHub/refs/heads/main/script"
+local VALIDATE_URL = "https://web-production-90f6b.up.railway.app/validate"
+local Onrusha
+
+do
+    if type(loadstring) ~= "function" then
+        error("[Onrusha] loadstring is unavailable in this environment")
+    end
+
+    local ok, result = pcall(function()
+        local source = game:HttpGet(LIBRARY_URL)
+        assert(type(source) == "string" and #source > 0, "Library source is empty")
+        local chunk, compileError = loadstring(source)
+        assert(type(chunk) == "function", tostring(compileError or "Library compilation failed"))
+        return chunk()
+    end)
+
+    if not ok then
+        error("[Onrusha] Failed to load library: " .. tostring(result))
+    end
+
+    assert(type(result) == "table" and type(result.Create) == "function", "Invalid Onrusha API")
+    Onrusha = result
+end
+
+local key = ""
+if type(isfile) == "function" and type(readfile) == "function" then
+    local ok, exists = pcall(isfile, "onrusha_key.txt")
+    if ok and exists then
+        local readOK, content = pcall(readfile, "onrusha_key.txt")
+        if readOK and type(content) == "string" then
+            key = content:match("^%s*(.-)%s*$") or ""
+        end
+    end
+end
+
+local created, ui = pcall(function()
+    return Onrusha:Create({
+        Name = "Onrusha",
+        Subtitle = "Automation Hub",
+        Open = true,
+        ToggleKey = Enum.KeyCode.RightShift,
+        Theme = "Matcha",
+        Scale = 0.82,
+        Draggable = true,
+        MobileSupport = true,
+        Blur = true,
+        BackgroundEffect = "Starfall",
+        BackgroundTransparency = 0.05,
+        KeyGate = {
+            Enabled = true,
+            Key = key,
+            ValidateUrl = VALIDATE_URL,
+            DiscordUrl = "https://discord.gg/NWyfNUzTF"
+        }
+    })
+end)
+
+if not created or type(ui) ~= "table" then
+    error("[Onrusha] Failed to create UI: " .. tostring(ui))
+end
+
+local legacyTabs = {}
+local componentCounter = 0
+
+local function makeControlId(name)
+    componentCounter += 1
+    local safeName = tostring(name):lower():gsub("[^%w]+", "_")
+    return "legacy_" .. tostring(componentCounter) .. "_" .. safeName
+end
+
+local gui = {}
+
+function gui:GetTab(name)
+    name = tostring(name or "Main")
+    if legacyTabs[name] then
+        return legacyTabs[name]
+    end
+
+    local tab = ui:TabCreate({
+        Name = name,
+        Icon = name:sub(1, 1),
+        Description = name .. " controls."
+    })
+
+    local isVisualTab = name:lower():find("visual", 1, true) ~= nil
+    local general = tab:SectionCreate({
+        Name = isVisualTab and "Item ESP" or "Automation",
+        Side = "Left"
+    })
+    local extra = tab:SectionCreate({
+        Name = isVisualTab and "Player ESP" or "Options",
+        Side = "Right"
+    })
+    local legacyTab = {}
+
+    function legacyTab:AddSlider(label, minValue, maxValue, defaultValue, callback, description)
+        local min = tonumber(minValue) or 0
+        local max = tonumber(maxValue) or 100
+        local default = tonumber(defaultValue) or min
+        local component = general:SliderCreate({
+            Id = makeControlId(label),
+            Name = tostring(label),
+            Description = description or ("Adjust " .. tostring(label) .. "."),
+            Min = min,
+            Max = max,
+            Default = math.clamp(default, min, max),
+            Step = 1
+        })
+        if type(callback) == "function" then
+            component:OnChanged(callback)
+        end
+        return component
+    end
+
+    function legacyTab:AddToggle(label, defaultValue, callback, description, settingsBuilder)
+        local lowerName = tostring(label):lower()
+        local targetSection = general
+        if lowerName == "player esp" or lowerName:find("punch", 1, true) then
+            targetSection = extra
+        end
+
+        local component = targetSection:ToggleCreate({
+            Id = makeControlId(label),
+            Name = tostring(label),
+            Description = description or ("Toggle " .. tostring(label) .. "."),
+            Default = defaultValue == true
+        })
+
+        local function applyToggle(value)
+            SavedToggleState[tostring(label)] = value == true
+            saveToggleState()
+            if type(callback) == "function" then
+                callback(value == true)
+            end
+        end
+
+        component:OnChanged(applyToggle)
+
+        if type(settingsBuilder) == "function" then
+            local settingsTarget
+            local settingsSetupOK, settingsSetupError = pcall(function()
+                if lowerName == "auto give me" or lowerName == "auto lift" then
+                    settingsTarget = component:CreateSettings({ Name = tostring(label) .. " Settings" })
+                elseif lowerName == "auto item" then
+                    settingsTarget = {
+                        Movement = tab:SectionCreate({ Name = "Auto Item Movement", Side = "Left" }),
+                        Filter = tab:SectionCreate({ Name = "Item Filter", Side = "Right" })
+                    }
+                else
+                    settingsTarget = targetSection
+                end
+            end)
+            if not settingsSetupOK then
+                warn("[Onrusha] Could not prepare settings for " .. tostring(label) .. ": " .. tostring(settingsSetupError))
+            elseif settingsTarget then
+                local builderOK, builderError = pcall(settingsBuilder, settingsTarget)
+                if not builderOK then
+                    warn("[Onrusha] Could not create settings for " .. tostring(label) .. ": " .. tostring(builderError))
+                end
+            end
+        end
+
+        if defaultValue == true then
+            task.defer(applyToggle, true)
+        end
+
+        return component
+    end
+
+    legacyTabs[name] = legacyTab
+    return legacyTab
+end
+
+local main = gui:GetTab("Automation")
+local visualsTab = gui:GetTab("Visuals")
+
+local AutoGiveMe = false
+local AutoLift = false
+local AutoItem = false
+local AutoSell = false
+local AutoStr = false
+local AutoBase = false
+local AntiP = false
+local AutoItemBusy = false
+local GiveMeThreshold = 3
+local LiftInterval = 0.3
+
+-- Auto Item movement and selection settings.
+local AutoItemSpeedMode = "Adaptive"
+local AutoItemFixedSpeed = 70
+local AutoItemSortMode = "Most Expensive"
+local AutoItemMinWeight = 0
+local AutoItemMaxWeight = 1000000000
+local AutoItemMaxDistance = 5000
+local AutoItemPickupAttempts = 10
+local AutoItemPickupDelay = 0.4
+local AutoItemRefreshInterval = 10
+local AutoItemPickupHeight = 3
+local AutoItemDropHeight = 5
+
+local ItemESP = false
+local ItemESPObjects = {}
+local ItemESPSettings = {
+    UseWeightGradient = true,
+    HighlightColor = Color3.fromRGB(255, 170, 50),
+    OutlineColor = Color3.fromRGB(255, 255, 255),
+    FillTransparency = 0.5,
+    ShowWeight = true,
+    TextColor = Color3.fromRGB(255, 255, 255),
+    TextSize = 14
+}
+
+local PlayerESP = false
+local PlayerESPObjects = {}
+local PlayerESPSettings = {
+    HighlightColor = Color3.fromRGB(255, 0, 0),
+    OutlineColor = Color3.fromRGB(255, 255, 255),
+    FillTransparency = 0.5,
+    ShowName = true,
+    TextColor = Color3.fromRGB(255, 255, 255),
+    TextSize = 14
+}
+
+main:AddSlider("Speed", 16, 250, 16, function(value)
+    local char = player.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if hum then
+        hum.WalkSpeed = value
+    end
+end, "Set local WalkSpeed.")
+
+main:AddToggle("Auto Give Me", getToggleDefault("Auto Give Me", false), function(value)
+    AutoGiveMe = value
+    if not value then return end
+    task.spawn(function()
+        while AutoGiveMe do
+            local success, label = pcall(function()
+                return player.PlayerGui.HUD.TopButtons.GiveMeButtonHolder.GiveMePlate.Face.Content.Texts.Count.Label
+            end)
+            if success and label then
+                local a = string.split(label.Text, "/")
+                local current = tonumber(a[1])
+                if current and current >= GiveMeThreshold then
+                    pcall(function()
+                        ReplicatedStorage.Remotes.HoleGiveMe:InvokeServer()
+                    end)
+                end
+            end
+            task.wait(0.1)
+        end
+    end)
+end, "Request Give Me at the selected count.", function(settings)
+    local thresholdSlider = settings:SliderCreate({
+        Id = makeControlId("give_me_threshold"),
+        Name = "Required item count",
+        Description = "Set the required item count.",
+        Min = 3,
+        Max = 10,
+        Default = 3,
+        Step = 1,
+        Suffix = " items"
+    })
+    thresholdSlider:OnChanged(function(value)
+        GiveMeThreshold = math.clamp(math.floor(tonumber(value) or 3), 3, 10)
+    end)
+end)
+
+main:AddToggle("Auto Lift", getToggleDefault("Auto Lift", false), function(value)
+    AutoLift = value
+    if not value then return end
+    task.spawn(function()
+        while AutoLift do
+            if not AutoItemBusy then
+                local char = player.Character
+                local backpack = player:FindFirstChildOfClass("Backpack")
+                local hum = char and char:FindFirstChildOfClass("Humanoid")
+                if char and backpack and hum then
+                    local dumbbell = char:FindFirstChild("Dumbbell") or backpack:FindFirstChild("Dumbbell")
+                    if dumbbell then
+                        if dumbbell.Parent == backpack then
+                            hum:EquipTool(dumbbell)
+                            task.wait(0.15)
+                        end
+                        if not AutoItemBusy then
+                            pcall(function()
+                                ReplicatedStorage.Remotes.LiftDumbbell:FireServer()
+                            end)
+                        end
+                    end
+                end
+            end
+            task.wait(LiftInterval)
+        end
+    end)
+end, "Repeat lift events while equipped.", function(settings)
+    local intervalSlider = settings:SliderCreate({
+        Id = makeControlId("auto_lift_interval"),
+        Name = "Event interval",
+        Description = "Delay between lift events.",
+        Min = 0.3,
+        Max = 10,
+        Default = 0.3,
+        Step = 0.1,
+        Suffix = " sec"
+    })
+    intervalSlider:OnChanged(function(value)
+        LiftInterval = math.clamp(tonumber(value) or 0.3, 0.3, 10)
+    end)
+end)
+
+main:AddToggle("Auto Item", getToggleDefault("Auto Item", false), function(value)
+    AutoItem = value
+    if not value then
+        AutoItemBusy = false
+        return
+    end
+    task.spawn(function()
+        local lastActivity = tick()
+        local workerRunning = false
+
+        local function GetCharacter()
+            local char = player.Character
+            if not char then return end
+            local hum = char:FindFirstChildOfClass("Humanoid")
+            local root = char:FindFirstChild("HumanoidRootPart")
+            if not hum or not root or hum.Health <= 0 then return end
+            return char, hum, root
+        end
+
+        local function CheckGiveMe()
+            if not AutoItem then return end
+            local success, label = pcall(function()
+                return player.PlayerGui.HUD.TopButtons.GiveMeButtonHolder.GiveMePlate.Face.Content.Texts.Count.Label
+            end)
+            if not success or not label then return end
+            local a = string.split(tostring(label.Text), "/")
+            local current = tonumber(a[1])
+            local max = tonumber(a[2])
+            if not current or not max or current < GiveMeThreshold then return end
+
+            local done = false
+            task.spawn(function()
+                pcall(function()
+                    ReplicatedStorage.Remotes.HoleGiveMe:InvokeServer()
+                end)
+                done = true
+            end)
+
+            local timeout = tick() + 2
+            while AutoItem and not done and tick() < timeout do
+                lastActivity = tick()
+                task.wait(0.05)
+            end
+
+            local waitUntil = tick() + 1
+            while AutoItem and tick() < waitUntil do
+                local ok, text = pcall(function()
+                    return label.Text
+                end)
+                if ok then
+                    local b = string.split(tostring(text), "/")
+                    local newCurrent = tonumber(b[1])
+                    if newCurrent and newCurrent < GiveMeThreshold then
+                        break
+                    end
+                end
+                lastActivity = tick()
+                task.wait(0.05)
+            end
+        end
+
+        local function GetItems(folder, strength, rootPosition)
+            local items = {}
+            local weightCap = math.min(tonumber(strength) or 0, AutoItemMaxWeight)
+            for _, item in ipairs(folder:GetChildren()) do
+                local weight = item:GetAttribute("Weight")
+                local part = item:IsA("BasePart") and item or item:FindFirstChildWhichIsA("BasePart", true)
+                local prompt = item:FindFirstChild("PickupPrompt", true)
+                local withinDistance = true
+                if part and rootPosition then
+                    withinDistance = (part.Position - rootPosition).Magnitude <= AutoItemMaxDistance
+                end
+                if typeof(weight) == "number"
+                    and weight >= AutoItemMinWeight
+                    and weight <= weightCap
+                    and withinDistance
+                    and part
+                    and prompt
+                    and prompt:IsA("ProximityPrompt") then
+                    table.insert(items, {
+                        Item = item,
+                        Weight = weight,
+                        Part = part,
+                        Prompt = prompt,
+                        Distance = rootPosition and (part.Position - rootPosition).Magnitude or math.huge
+                    })
+                end
+            end
+            table.sort(items, function(a, b)
+                if AutoItemSortMode == "Cheapest" then
+                    return a.Weight < b.Weight
+                elseif AutoItemSortMode == "Nearest" then
+                    return a.Distance < b.Distance
+                elseif AutoItemSortMode == "Farthest" then
+                    return a.Distance > b.Distance
+                elseif AutoItemSortMode == "Balanced" then
+                    local scoreA = a.Weight / math.max(a.Distance, 1)
+                    local scoreB = b.Weight / math.max(b.Distance, 1)
+                    return scoreA > scoreB
+                end
+                return a.Weight > b.Weight
+            end)
+            return items
+        end
+
+        local function GetAutoItemMovementSpeed(hum)
+            if AutoItemSpeedMode == "Fixed" then
+                return math.max(tonumber(AutoItemFixedSpeed) or 70, 1)
+            end
+
+            local walkSpeed = hum and tonumber(hum.WalkSpeed) or 16
+            local reduction
+            if walkSpeed > 100 then
+                reduction = 30
+            elseif walkSpeed >= 50 then
+                reduction = 20
+            elseif walkSpeed >= 30 then
+                reduction = 10
+            else
+                reduction = 5
+            end
+            -- Preserve the tiered WalkSpeed deduction, then apply a slower travel multiplier.
+            -- This affects Auto Item's interpolation only, not the character WalkSpeed itself.
+            return math.max((walkSpeed - reduction) * 0.6, 1)
+        end
+
+        local function MoveSmooth(root, from, to)
+            if not root or not root.Parent then return false end
+            local hum = root.Parent:FindFirstChildOfClass("Humanoid")
+            if not hum then return false end
+            local current = from
+            if (to - current).Magnitude <= 0.01 then return true end
+            root.CFrame = CFrame.new(current)
+            while AutoItem do
+                if not root.Parent or player.Character ~= root.Parent then return false end
+                hum = root.Parent:FindFirstChildOfClass("Humanoid")
+                if not hum or hum.Health <= 0 then return false end
+                local delta = to - current
+                local distance = delta.Magnitude
+                if distance <= 0.08 then
+                    current = to
+                    root.CFrame = CFrame.new(to)
+                    break
+                end
+                local dt = RunService.Heartbeat:Wait()
+                local step = GetAutoItemMovementSpeed(hum) * math.max(dt, 0)
+                if step >= distance then
+                    current = to
+                else
+                    current += delta.Unit * step
+                end
+                root.CFrame = CFrame.new(current)
+                lastActivity = tick()
+            end
+            if not AutoItem or not root.Parent or player.Character ~= root.Parent then return false end
+            root.CFrame = CFrame.new(to)
+            lastActivity = tick()
+            return true
+        end
+
+        local function Worker()
+            if workerRunning then return end
+            workerRunning = true
+            while AutoItem do
+                local success = pcall(function()
+                    lastActivity = tick()
+                    CheckGiveMe()
+                    if not AutoItem then return end
+                    local char, hum, root = GetCharacter()
+                    if not char or not hum or not root then
+                        AutoItemBusy = false
+                        task.wait(0.5)
+                        return
+                    end
+                    local spawnedItems = workspace:FindFirstChild("SpawnedItems")
+                    local strength = player:GetAttribute("Strength")
+                    local assignedBase = tostring(player:GetAttribute("AssignedBase"))
+                    if not spawnedItems or typeof(strength) ~= "number" then
+                        AutoItemBusy = false
+                        task.wait(0.5)
+                        return
+                    end
+                    local map = workspace:FindFirstChild("0Map")
+                    local base = map and map:FindFirstChild(assignedBase, true)
+                    local baseHole = base and base:FindFirstChild("hole", true)
+                    if not baseHole or not baseHole:IsA("BasePart") then
+                        AutoItemBusy = false
+                        task.wait(0.5)
+                        return
+                    end
+                    local items = GetItems(spawnedItems, strength, root.Position)
+                    local refresh = tick() + AutoItemRefreshInterval
+                    while AutoItem do
+                        lastActivity = tick()
+                        char, hum, root = GetCharacter()
+                        if not char or not hum or not root then
+                            AutoItemBusy = false
+                            break
+                        end
+                        if tick() >= refresh then
+                            strength = player:GetAttribute("Strength")
+                            if typeof(strength) ~= "number" then break end
+                            items = GetItems(spawnedItems, strength, root.Position)
+                            refresh = tick() + AutoItemRefreshInterval
+                        end
+                        local data = table.remove(items, 1)
+                        if not data then
+                            items = GetItems(spawnedItems, strength, root.Position)
+                            task.wait(0.15)
+                            continue
+                        end
+                        if not data.Item or data.Item.Parent ~= spawnedItems then continue end
+                        data.Part = data.Item:IsA("BasePart") and data.Item or data.Item:FindFirstChildWhichIsA("BasePart", true)
+                        data.Prompt = data.Item:FindFirstChild("PickupPrompt", true)
+                        if not data.Part or not data.Prompt or not data.Prompt:IsA("ProximityPrompt") then continue end
+                        CheckGiveMe()
+                        if not AutoItem then break end
+                        char, hum, root = GetCharacter()
+                        if not char or not hum or not root then
+                            AutoItemBusy = false
+                            break
+                        end
+                        AutoItemBusy = true
+                        local pickupPosition = data.Part.Position + Vector3.new(0, AutoItemPickupHeight, 0)
+                        local reachedItem = MoveSmooth(root, root.Position, pickupPosition)
+                        if not reachedItem then
+                            AutoItemBusy = false
+                            if not AutoItem then break end
+                            continue
+                        end
+                        task.wait(0.15)
+                        local pickedUp = false
+                        for _ = 1, AutoItemPickupAttempts do
+                            if not AutoItem then break end
+                            char, hum, root = GetCharacter()
+                            if not char or not hum or not root then break end
+                            if not data.Item or data.Item.Parent ~= spawnedItems then
+                                pickedUp = true
+                                break
+                            end
+                            if not data.Prompt or not data.Prompt.Parent then break end
+                            if not data.Prompt.Enabled then
+                                pickedUp = true
+                                break
+                            end
+                            pcall(function()
+                                fireproximityprompt(data.Prompt)
+                            end)
+                            lastActivity = tick()
+                            task.wait(AutoItemPickupDelay)
+                            if data.Item.Parent ~= spawnedItems then
+                                pickedUp = true
+                                break
+                            end
+                            if data.Prompt and data.Prompt.Parent and not data.Prompt.Enabled then
+                                pickedUp = true
+                                break
+                            end
+                        end
+                        if not AutoItem then break end
+                        if not pickedUp then
+                            AutoItemBusy = false
+                            continue
+                        end
+                        char, hum, root = GetCharacter()
+                        if not char or not hum or not root then
+                            AutoItemBusy = false
+                            break
+                        end
+                        local targetHole = baseHole
+                        local closest = (root.Position - baseHole.Position).Magnitude
+                        local auxHoles = workspace:FindFirstChild("AuxHoles")
+                        if auxHoles then
+                            for _, hole in ipairs(auxHoles:GetChildren()) do
+                                local zone = tonumber(string.match(hole.Name, "^AuxHole_Zone(%d+)"))
+                                if zone and zone >= 2 then
+                                    local hitbox = hole:FindFirstChild("HoleHitbox")
+                                    local status = hitbox and hitbox:FindFirstChild("AuxHoleStatus")
+                                    local panel = status and status:FindFirstChild("Panel")
+                                    local face = panel and panel:FindFirstChild("Face")
+                                    local content = face and face:FindFirstChild("Content")
+                                    local auxStatus = content and content:FindFirstChild("AuxStatus")
+                                    local label = auxStatus and auxStatus:FindFirstChild("Label")
+                                    if label and label:IsA("TextLabel") and label.Text == "Linked to your base" and hitbox and hitbox:IsA("BasePart") then
+                                        local distance = (root.Position - hitbox.Position).Magnitude
+                                        if distance < closest then
+                                            closest = distance
+                                            targetHole = hitbox
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                        if targetHole and targetHole:IsA("BasePart") then
+                            char, hum, root = GetCharacter()
+                            if not char or not hum or not root then
+                                AutoItemBusy = false
+                                break
+                            end
+                            local oldCollision = {}
+                            for _, part in ipairs(char:GetDescendants()) do
+                                if part:IsA("BasePart") then
+                                    oldCollision[part] = part.CanCollide
+                                    part.CanCollide = false
+                                end
+                            end
+                            local startPos = root.Position
+                            local targetPos = targetHole.Position + Vector3.new(0, AutoItemDropHeight, 0)
+                            local lowY = startPos.Y - 15
+                            local down = Vector3.new(startPos.X, lowY, startPos.Z)
+                            local lowTarget = Vector3.new(targetPos.X, lowY, targetPos.Z)
+                            local moved = MoveSmooth(root, startPos, down)
+                            if moved and AutoItem then moved = MoveSmooth(root, down, lowTarget) end
+                            if moved and AutoItem then moved = MoveSmooth(root, lowTarget, targetPos) end
+                            for part, collision in pairs(oldCollision) do
+                                if part and part.Parent then part.CanCollide = collision end
+                            end
+                            if not moved then
+                                AutoItemBusy = false
+                                break
+                            end
+                            if not AutoItem then break end
+
+                            -- Pause after arriving, tilt the camera down, trigger the throw, then restore it.
+                            task.wait(0.5)
+                            local camera = workspace.CurrentCamera
+                            local savedCameraType
+                            local savedCameraSubject
+                            local savedCameraCFrame
+
+                            if camera then
+                                savedCameraType = camera.CameraType
+                                savedCameraSubject = camera.CameraSubject
+                                savedCameraCFrame = camera.CFrame
+                                camera.CameraType = Enum.CameraType.Scriptable
+                                camera.CFrame = savedCameraCFrame * CFrame.Angles(math.rad(-65), 0, 0)
+                            end
+
+                            local throwOK, throwError = pcall(function()
+                                ReplicatedStorage.Remotes.ThrowItem:FireServer(Vector3.new(-0.02630472369492054, 0, 0.99965393543243408))
+                            end)
+
+                            task.wait(0.5)
+
+                            if camera and camera.Parent and savedCameraCFrame then
+                                camera.CFrame = savedCameraCFrame
+                                if savedCameraSubject then
+                                    camera.CameraSubject = savedCameraSubject
+                                end
+                                camera.CameraType = savedCameraType or Enum.CameraType.Custom
+                                camera.CFrame = savedCameraCFrame
+                            end
+
+                            if not throwOK then
+                                warn("[AutoItem] ThrowItem failed:", throwError)
+                            end
+
+                            lastActivity = tick()
+                            task.wait(0.15)
+                        end
+                        AutoItemBusy = false
+                        lastActivity = tick()
+                    end
+                end)
+                AutoItemBusy = false
+                if not success then task.wait(0.3) end
+                task.wait(0.05)
+            end
+            AutoItemBusy = false
+            workerRunning = false
+        end
+
+        task.spawn(function()
+            while AutoItem do
+                task.wait(2)
+                if not AutoItem then break end
+                if not workerRunning then
+                    task.spawn(Worker)
+                elseif tick() - lastActivity > 6 then
+                    AutoItemBusy = false
+                    workerRunning = false
+                    task.spawn(Worker)
+                end
+            end
+        end)
+        Worker()
+    end)
+        end, "Collect and deliver matching items smoothly.", function(settings)
+            local movementSettings = settings.Movement
+            local filterSettings = settings.Filter
+            if not movementSettings or not filterSettings then
+                error("Auto Item settings sections were not created")
+            end
+
+            movementSettings:DropdownCreate({
+                Id = makeControlId("auto_item_speed_mode"),
+                Name = "Speed mode",
+                Description = "Adaptive uses reduced WalkSpeed.",
+                Options = { "Adaptive", "Fixed" },
+                Default = "Adaptive"
+            }):OnChanged(function(value)
+                AutoItemSpeedMode = value == "Fixed" and "Fixed" or "Adaptive"
+            end)
+
+            movementSettings:SliderCreate({
+                Id = makeControlId("auto_item_fixed_speed"),
+                Name = "Fixed speed",
+                Description = "Used only in Fixed mode.",
+                Min = 5,
+                Max = 250,
+                Default = 70,
+                Step = 1,
+                Suffix = " studs/s"
+            }):OnChanged(function(value)
+                AutoItemFixedSpeed = math.clamp(tonumber(value) or 70, 5, 250)
+            end)
+
+            movementSettings:SliderCreate({
+                Id = makeControlId("auto_item_max_distance"),
+                Name = "Max pickup distance",
+                Description = "Ignore distant items.",
+                Min = 100,
+                Max = 20000,
+                Default = 5000,
+                Step = 100,
+                Suffix = " studs"
+            }):OnChanged(function(value)
+                AutoItemMaxDistance = math.clamp(tonumber(value) or 5000, 100, 20000)
+            end)
+
+            filterSettings:DropdownCreate({
+                Id = makeControlId("auto_item_sort_mode"),
+                Name = "Item priority",
+                Description = "Choose weight or distance priority.",
+                Options = { "Most Expensive", "Cheapest", "Nearest", "Farthest", "Balanced" },
+                Default = "Most Expensive"
+            }):OnChanged(function(value)
+                AutoItemSortMode = value
+            end)
+
+            filterSettings:SliderCreate({
+                Id = makeControlId("auto_item_min_weight"),
+                Name = "Minimum weight",
+                Description = "Skip lighter items.",
+                Min = 0,
+                Max = 1000000000,
+                Default = 0,
+                Step = 1000
+            }):OnChanged(function(value)
+                AutoItemMinWeight = math.clamp(tonumber(value) or 0, 0, AutoItemMaxWeight)
+            end)
+
+            filterSettings:SliderCreate({
+                Id = makeControlId("auto_item_max_weight"),
+                Name = "Maximum weight",
+                Description = "Skip heavier items.",
+                Min = 0,
+                Max = 1000000000,
+                Default = 1000000000,
+                Step = 1000
+            }):OnChanged(function(value)
+                AutoItemMaxWeight = math.clamp(tonumber(value) or 1000000000, 0, 1000000000)
+                AutoItemMinWeight = math.min(AutoItemMinWeight, AutoItemMaxWeight)
+            end)
+        end)
+
+main:AddToggle("Auto Sell Item", getToggleDefault("Auto Sell Item", false), function(value)
+    AutoSell = value
+    if not value then return end
+    task.spawn(function()
+        while AutoSell do
+            local inventory = player:FindFirstChild("ArtifactInventory")
+            if inventory then
+                for _, item in ipairs(inventory:GetChildren()) do
+                    if not AutoSell then break end
+                    pcall(function()
+                        ReplicatedStorage.Remotes.SellArtifact:InvokeServer(item.Name)
+                    end)
+                    task.wait(0.1)
+                end
+            end
+            task.wait(0.1)
+        end
+    end)
+end, "Sell inventory artifacts automatically.")
+
+main:AddToggle("Auto Strenght Upgrade", getToggleDefault("Auto Strenght Upgrade", false), function(value)
+    AutoStr = value
+    if not value then return end
+    task.spawn(function()
+        while AutoStr do
+            local success, err = pcall(function()
+                local char = player.Character
+                local root = char and char:FindFirstChild("HumanoidRootPart")
+                local label = player.PlayerGui.StrengthShopGui.PanelShell.Window.BuyButton.Face.Content.Caption.Label
+                local price = tonumber(string.gsub(label.Text, "[^%d]", ""))
+                local leaderstats = player:FindFirstChild("leaderstats")
+                local coinsObject = leaderstats and leaderstats:FindFirstChild("Coins")
+                if not root or not coinsObject then return end
+                local coins = tonumber(string.gsub(tostring(coinsObject.Value), "[^%d]", ""))
+                if price and coins and coins >= price then
+                    local oldCFrame = root.CFrame
+                    root.CFrame = CFrame.new(79, 2.54999995, 845.450012)
+                    task.wait(0.15)
+                    ReplicatedStorage.Remotes.BuyShopUpgrade:InvokeServer("Strength")
+                    task.wait(0.15)
+                    if root.Parent then root.CFrame = oldCFrame end
+                end
+            end)
+            if not success then warn("[AutoStrength] Error:", err) end
+            task.wait(0.5)
+        end
+    end)
+end, "Buy Strength upgrades when affordable.")
+
+main:AddToggle("Auto Base Upgrade", getToggleDefault("Auto Base Upgrade", false), function(value)
+    AutoBase = value
+    if not value then return end
+    task.spawn(function()
+        while AutoBase do
+            local reqmanny = -1
+            local yes = 0
+            local success, requirements = pcall(function()
+                return player.PlayerGui.BaseEvolution.PanelShell.Window.CardPane.Requirements
+            end)
+            if success and requirements then
+                for _, req in ipairs(requirements:GetChildren()) do
+                    if req.Name == "Req" then
+                        reqmanny += 1
+                        local plate = req:FindFirstChild("Plate")
+                        local base = plate and plate:FindFirstChild("Base")
+                        if base and base:IsA("Frame") and base.BackgroundColor3 ~= Color3.fromRGB(48, 50, 60) then
+                            yes += 1
+                        end
+                    end
+                end
+                if reqmanny > 0 and yes >= reqmanny then
+                    pcall(function()
+                        ReplicatedStorage.Remotes.EvolveBase:InvokeServer()
+                    end)
+                end
+            end
+            task.wait(0.5)
+        end
+    end)
+end, "Evolve your base when ready.")
+
+main:AddToggle("Anti Punch", getToggleDefault("Anti Punch", false), function(value)
+    AntiP = value
+    if value then
+        task.spawn(function()
+            while AntiP do
+                local char = player.Character
+                local hum = char and char:FindFirstChildOfClass("Humanoid")
+                if hum and hum.Health ~= 0 then
+                    hum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
+                    hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
+                    hum:SetStateEnabled(Enum.HumanoidStateType.PlatformStanding, false)
+                    hum:ChangeState(Enum.HumanoidStateType.Running)
+                end
+                task.wait()
+            end
+        end)
+    else
+        local char = player.Character
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        if hum then
+            hum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, true)
+            hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, true)
+            hum:SetStateEnabled(Enum.HumanoidStateType.PlatformStanding, true)
+        end
+    end
+end, "Reduce local knockdown states.")
+
+local AutoReconnect = false
+local autoReconnectConnection
+local reconnectBusy = false
+local lastReconnectAttempt = 0
+
+local function isBanErrorMessage(message)
+    local text = string.lower(tostring(message or ""))
+    local markers = {
+        "you are banned", "you were banned", "you have been banned", "banned from this experience",
+        "permanently banned", "permanent ban", "ban appeal", "account terminated", "account deleted",
+        "account has been moderated", "moderation action", "account moderation", "experience ban"
+    }
+    for _, marker in ipairs(markers) do
+        if text:find(marker, 1, true) then
+            return true
+        end
+    end
+    return false
+end
+
+local function stopReconnectForBan(message)
+    AutoReconnect = false
+    reconnectBusy = false
+    SavedToggleState["Auto Reconnect"] = false
+    saveToggleState()
+    warn("[Onrusha] Auto Reconnect disabled because the error looks like a ban/moderation message:", tostring(message))
+end
+
+local function tryReconnect(errorMessage)
+    if not AutoReconnect or reconnectBusy then
+        return
+    end
+
+    if isBanErrorMessage(errorMessage) then
+        stopReconnectForBan(errorMessage)
+        return
+    end
+
+    local now = os.clock()
+    if now - lastReconnectAttempt < 4 then
+        return
+    end
+
+    lastReconnectAttempt = now
+    reconnectBusy = true
+    saveToggleState()
+    queueReloadOnTeleport()
+
+    task.spawn(function()
+        task.wait(1)
+        if not AutoReconnect then
+            reconnectBusy = false
+            return
+        end
+
+        local ok, err = pcall(function()
+            TeleportService:Teleport(game.PlaceId, player)
+        end)
+
+        if not ok then
+            warn("[Onrusha] Reconnect attempt failed:", tostring(err))
+            reconnectBusy = false
+            task.delay(4, function()
+                if AutoReconnect then
+                    tryReconnect("network retry")
+                end
+            end)
+            return
+        end
+
+        -- Some failures are asynchronous; retry if teleport did not leave this server.
+        task.delay(15, function()
+            if AutoReconnect and reconnectBusy then
+                reconnectBusy = false
+                tryReconnect("teleport timeout retry")
+            end
+        end)
+    end)
+end
+
+-- ErrorMessageChanged is not exposed in every standard Roblox runtime; access it safely.
+local errorSignalOK, errorMessageSignal = pcall(function()
+    return GuiService.ErrorMessageChanged
+end)
+if errorSignalOK and errorMessageSignal then
+    local connectOK, connectError = pcall(function()
+        errorMessageSignal:Connect(function(errorMessage)
+            if not AutoReconnect or type(errorMessage) ~= "string" or errorMessage == "" then
+                return
+            end
+            tryReconnect(errorMessage)
+        end)
+    end)
+    if not connectOK then
+        warn("[Onrusha] Could not connect ErrorMessageChanged:", tostring(connectError))
+    end
+else
+    warn("[Onrusha] GuiService.ErrorMessageChanged is unavailable; reconnect can only handle teleport failures.")
+end
+
+TeleportService.TeleportInitFailed:Connect(function(failedPlayer, teleportResult, errorMessage)
+    if failedPlayer ~= player or not AutoReconnect then
+        return
+    end
+
+    if isBanErrorMessage(errorMessage) then
+        stopReconnectForBan(errorMessage)
+        return
+    end
+
+    reconnectBusy = false
+    task.delay(4.5, function()
+        if AutoReconnect then
+            tryReconnect(errorMessage or tostring(teleportResult))
+        end
+    end)
+end)
+
+main:AddToggle("Auto Reconnect", getToggleDefault("Auto Reconnect", false), function(value)
+    AutoReconnect = value
+    reconnectBusy = false
+    if autoReconnectConnection then
+        autoReconnectConnection:Disconnect()
+        autoReconnectConnection = nil
+    end
+    if not value then
+        SavedToggleState["Auto Reconnect"] = false
+        saveToggleState()
+        return
+    end
+
+    saveToggleState()
+    if not queueReloadOnTeleport() then
+        warn("[Onrusha] Auto Reconnect is enabled, but auto-reload after teleport is not configured.")
+    end
+
+    autoReconnectConnection = player.OnTeleport:Connect(function(state)
+        if not AutoReconnect or state ~= Enum.TeleportState.Started then
+            return
+        end
+        saveToggleState()
+        queueReloadOnTeleport()
+    end)
+end, "Reconnect on connection errors; skips detected ban messages.")
+
+local function ClearItemESP()
+    for item, objects in pairs(ItemESPObjects) do
+        if objects.Highlight then objects.Highlight:Destroy() end
+        if objects.Billboard then objects.Billboard:Destroy() end
+        ItemESPObjects[item] = nil
+    end
+end
+
+local function GetItemWeightColor(weight)
+    local alpha = math.clamp(weight / 75000, 0, 1)
+    if alpha < 0.25 then
+        local t = alpha / 0.25
+        return Color3.new(t, 1, 0)
+    elseif alpha < 0.5 then
+        local t = (alpha - 0.25) / 0.25
+        return Color3.new(1, 1 - t, 0)
+    elseif alpha < 0.75 then
+        local t = (alpha - 0.5) / 0.25
+        return Color3.new(1, 0.5 - t * 0.5, 0)
+    end
+    local t = (alpha - 0.75) / 0.25
+    return Color3.new(1 - t, 0, 0.5 + t * 0.5)
+end
+
+local function AddItemESP(item)
+    if ItemESPObjects[item] then return end
+    local weight = item:GetAttribute("Weight")
+    local part = item:IsA("BasePart") and item or item:FindFirstChildWhichIsA("BasePart", true)
+    if not part or typeof(weight) ~= "number" then return end
+
+    local color = ItemESPSettings.UseWeightGradient and GetItemWeightColor(weight) or ItemESPSettings.HighlightColor
+    local highlight = Instance.new("Highlight")
+    highlight.Name = "ItemESP"
+    highlight.Adornee = item
+    highlight.FillColor = color
+    highlight.OutlineColor = ItemESPSettings.OutlineColor
+    highlight.FillTransparency = ItemESPSettings.FillTransparency
+    highlight.Parent = item
+
+    local billboard
+    if ItemESPSettings.ShowWeight then
+        billboard = Instance.new("BillboardGui")
+        billboard.Name = "WeightESP"
+        billboard.Adornee = part
+        billboard.Size = UDim2.fromOffset(170, 34)
+        billboard.StudsOffset = Vector3.new(0, 3, 0)
+        billboard.AlwaysOnTop = true
+        billboard.Parent = item
+        local label = Instance.new("TextLabel")
+        label.Size = UDim2.fromScale(1, 1)
+        label.BackgroundTransparency = 1
+        label.Text = "Weight: " .. tostring(weight)
+        label.TextColor3 = ItemESPSettings.TextColor
+        label.TextSize = ItemESPSettings.TextSize
+        label.TextScaled = false
+        label.TextWrapped = true
+        label.TextStrokeTransparency = 0
+        label.Font = Enum.Font.GothamBold
+        label.Parent = billboard
+    end
+
+    ItemESPObjects[item] = { Highlight = highlight, Billboard = billboard }
+end
+
+local function RefreshItemESP()
+    if not ItemESP then return end
+    ClearItemESP()
+    local spawnedItems = workspace:FindFirstChild("SpawnedItems")
+    if spawnedItems then
+        for _, item in ipairs(spawnedItems:GetChildren()) do
+            AddItemESP(item)
+        end
+    end
+end
+
+visualsTab:AddToggle("Item ESP", getToggleDefault("Item ESP", false), function(value)
+    ItemESP = value
+    ClearItemESP()
+    if not value then return end
+    task.spawn(function()
+        while ItemESP do
+            local spawnedItems = workspace:FindFirstChild("SpawnedItems")
+            if spawnedItems then
+                for _, item in ipairs(spawnedItems:GetChildren()) do
+                    AddItemESP(item)
+                end
+                for item, objects in pairs(ItemESPObjects) do
+                    if item.Parent ~= spawnedItems then
+                        if objects.Highlight then objects.Highlight:Destroy() end
+                        if objects.Billboard then objects.Billboard:Destroy() end
+                        ItemESPObjects[item] = nil
+                    end
+                end
+            end
+            task.wait(0.2)
+        end
+        ClearItemESP()
+    end)
+end, "Highlight spawned items and their weight.", function(settings)
+    settings:ToggleCreate({ Id = makeControlId("item_esp_gradient"), Name = "Weight color gradient", Description = "Color by weight.", Default = true }):OnChanged(function(value)
+        ItemESPSettings.UseWeightGradient = value
+        RefreshItemESP()
+    end)
+    settings:ColorPickerCreate({ Id = makeControlId("item_esp_fill_color"), Name = "Highlight color", Description = "Solid fill color.", Default = ItemESPSettings.HighlightColor }):OnChanged(function(value)
+        ItemESPSettings.HighlightColor = value
+        RefreshItemESP()
+    end)
+    settings:ColorPickerCreate({ Id = makeControlId("item_esp_outline_color"), Name = "Outline color", Description = "Outline color.", Default = ItemESPSettings.OutlineColor }):OnChanged(function(value)
+        ItemESPSettings.OutlineColor = value
+        RefreshItemESP()
+    end)
+    settings:SliderCreate({ Id = makeControlId("item_esp_transparency"), Name = "Fill transparency", Description = "0 is solid; 1 is invisible.", Min = 0, Max = 1, Default = 0.5, Step = 0.05 }):OnChanged(function(value)
+        ItemESPSettings.FillTransparency = math.clamp(tonumber(value) or 0.5, 0, 1)
+        RefreshItemESP()
+    end)
+    settings:ToggleCreate({ Id = makeControlId("item_esp_show_weight"), Name = "Show weight label", Description = "Show item weight.", Default = true }):OnChanged(function(value)
+        ItemESPSettings.ShowWeight = value
+        RefreshItemESP()
+    end)
+    settings:ColorPickerCreate({ Id = makeControlId("item_esp_text_color"), Name = "Weight text color", Description = "Label color.", Default = ItemESPSettings.TextColor }):OnChanged(function(value)
+        ItemESPSettings.TextColor = value
+        RefreshItemESP()
+    end)
+    settings:SliderCreate({ Id = makeControlId("item_esp_text_size"), Name = "Weight text size", Description = "Label size.", Min = 10, Max = 30, Default = 14, Step = 1, Suffix = " px" }):OnChanged(function(value)
+        ItemESPSettings.TextSize = math.clamp(math.floor(tonumber(value) or 14), 10, 30)
+        RefreshItemESP()
+    end)
+end)
+
+local function ClearPlayerESP()
+    for target, objects in pairs(PlayerESPObjects) do
+        if objects.Highlight then objects.Highlight:Destroy() end
+        if objects.Billboard then objects.Billboard:Destroy() end
+        PlayerESPObjects[target] = nil
+    end
+end
+
+local function AddPlayerESP(target)
+    if target == player or PlayerESPObjects[target] then return end
+    local char = target.Character
+    if not char then return end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    local root = char:FindFirstChild("HumanoidRootPart")
+    if not hum or not root then return end
+
+    local highlight = Instance.new("Highlight")
+    highlight.Name = "PlayerESP"
+    highlight.Adornee = char
+    highlight.FillColor = PlayerESPSettings.HighlightColor
+    highlight.OutlineColor = PlayerESPSettings.OutlineColor
+    highlight.FillTransparency = PlayerESPSettings.FillTransparency
+    highlight.OutlineTransparency = 0
+    highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+    highlight.Parent = char
+
+    local billboard
+    if PlayerESPSettings.ShowName then
+        billboard = Instance.new("BillboardGui")
+        billboard.Name = "PlayerESPName"
+        billboard.Adornee = root
+        billboard.Size = UDim2.fromOffset(220, 38)
+        billboard.StudsOffset = Vector3.new(0, 3.5, 0)
+        billboard.AlwaysOnTop = true
+        billboard.Parent = char
+        local label = Instance.new("TextLabel")
+        label.Size = UDim2.fromScale(1, 1)
+        label.BackgroundTransparency = 1
+        label.Text = target.DisplayName .. " [" .. target.Name .. "]"
+        label.TextColor3 = PlayerESPSettings.TextColor
+        label.TextStrokeTransparency = 0
+        label.TextScaled = false
+        label.TextSize = PlayerESPSettings.TextSize
+        label.Font = Enum.Font.GothamBold
+        label.Parent = billboard
+    end
+
+    PlayerESPObjects[target] = { Highlight = highlight, Billboard = billboard }
+end
+
+local function RefreshPlayerESP()
+    if not PlayerESP then return end
+    ClearPlayerESP()
+    for _, target in ipairs(Players:GetPlayers()) do
+        if target ~= player then
+            AddPlayerESP(target)
+        end
+    end
+end
+
+visualsTab:AddToggle("Player ESP", getToggleDefault("Player ESP", false), function(value)
+    PlayerESP = value
+    ClearPlayerESP()
+    if not value then return end
+    task.spawn(function()
+        while PlayerESP do
+            for _, target in ipairs(Players:GetPlayers()) do
+                if target ~= player and not PlayerESPObjects[target] then
+                    AddPlayerESP(target)
+                end
+            end
+            for target, objects in pairs(PlayerESPObjects) do
+                if not target.Parent or not target.Character or not objects.Highlight or not objects.Highlight.Parent then
+                    if objects.Highlight then objects.Highlight:Destroy() end
+                    if objects.Billboard then objects.Billboard:Destroy() end
+                    PlayerESPObjects[target] = nil
+                end
+            end
+            task.wait(0.2)
+        end
+        ClearPlayerESP()
+    end)
+end, "Highlight players and show names.", function(settings)
+    settings:ColorPickerCreate({ Id = makeControlId("player_esp_fill_color"), Name = "Highlight color", Description = "Fill color.", Default = PlayerESPSettings.HighlightColor }):OnChanged(function(value)
+        PlayerESPSettings.HighlightColor = value
+        RefreshPlayerESP()
+    end)
+    settings:ColorPickerCreate({ Id = makeControlId("player_esp_outline_color"), Name = "Outline color", Description = "Set outline color.", Default = PlayerESPSettings.OutlineColor }):OnChanged(function(value)
+        PlayerESPSettings.OutlineColor = value
+        RefreshPlayerESP()
+    end)
+    settings:SliderCreate({ Id = makeControlId("player_esp_transparency"), Name = "Fill transparency", Description = "0 is solid; 1 is invisible.", Min = 0, Max = 1, Default = 0.5, Step = 0.05 }):OnChanged(function(value)
+        PlayerESPSettings.FillTransparency = math.clamp(tonumber(value) or 0.5, 0, 1)
+        RefreshPlayerESP()
+    end)
+    settings:ToggleCreate({ Id = makeControlId("player_esp_show_name"), Name = "Show player name", Description = "Show names.", Default = true }):OnChanged(function(value)
+        PlayerESPSettings.ShowName = value
+        RefreshPlayerESP()
+    end)
+    settings:ColorPickerCreate({ Id = makeControlId("player_esp_text_color"), Name = "Name text color", Description = "Name color.", Default = PlayerESPSettings.TextColor }):OnChanged(function(value)
+        PlayerESPSettings.TextColor = value
+        RefreshPlayerESP()
+    end)
+    settings:SliderCreate({ Id = makeControlId("player_esp_text_size"), Name = "Name text size", Description = "Name size.", Min = 10, Max = 30, Default = 14, Step = 1, Suffix = " px" }):OnChanged(function(value)
+        PlayerESPSettings.TextSize = math.clamp(math.floor(tonumber(value) or 14), 10, 30)
+        RefreshPlayerESP()
+    end)
+end)
+
+ui:Notify({
+    Title = "Onrusha loaded",
+    Description = "RightShift toggles the UI. Configure controls in each tab. Auto Reconnect needs a hosted script URL.",
+    Type = "Success",
+    Duration = 5
+})
