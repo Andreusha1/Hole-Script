@@ -6,8 +6,7 @@ local TeleportService = game:GetService("TeleportService")
 local HttpService = game:GetService("HttpService")
 local player = Players.LocalPlayer
 
--- Upload this file as autofarm.lua to the main branch before enabling Auto Reconnect.
-local AUTOMATION_SCRIPT_URL = "https://raw.githubusercontent.com/Andreusha1/OnrushaHub/refs/heads/main/autofarm.lua"
+local AUTOMATION_SCRIPT_URL = "https://raw.githubusercontent.com/Andreusha1/Hole-Script/refs/heads/main/script"
 local TOGGLE_STATE_FILE = "onrusha_autofarm_state.json"
 
 local function getEnvironments()
@@ -1384,7 +1383,7 @@ end)
 
 ui:Notify({
     Title = "Onrusha loaded",
-    Description = "RightShift toggles the UI. Configure controls in each tab. Auto Reconnect needs a hosted script URL.",
+    Description = "RightShift default key for toggles the UI. Configure controls in each tab.",
     Type = "Success",
     Duration = 5
 })
