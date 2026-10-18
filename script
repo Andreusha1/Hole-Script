@@ -6,6 +6,7 @@ local TeleportService = game:GetService("TeleportService")
 local HttpService = game:GetService("HttpService")
 local player = Players.LocalPlayer
 
+-- Auto Reconnect reloads this script from the Hole-Script repository.
 local AUTOMATION_SCRIPT_URL = "https://raw.githubusercontent.com/Andreusha1/Hole-Script/refs/heads/main/script"
 local TOGGLE_STATE_FILE = "onrusha_autofarm_state.json"
 
@@ -63,6 +64,7 @@ local function getToggleDefault(name, fallback)
     return fallback == true
 end
 
+local lastQueueAt = 0
 local function queueReloadOnTeleport()
     if type(AUTOMATION_SCRIPT_URL) ~= "string"
         or AUTOMATION_SCRIPT_URL == ""
@@ -85,32 +87,71 @@ local function queueReloadOnTeleport()
         return false
     end
 
+    if os.clock() - lastQueueAt < 2 then
+        return true
+    end
+    lastQueueAt = os.clock()
     saveToggleState()
+
+    local stateJson = HttpService:JSONEncode(SavedToggleState)
     local queuedCode = string.format([[
 local HttpService = game:GetService("HttpService")
-local shouldRun = false
+local stateJson = %q
+local stateOK, restoredState = pcall(function() return HttpService:JSONDecode(stateJson) end)
+if not stateOK or type(restoredState) ~= "table" then
+    warn("[Onrusha] Auto Reconnect: saved state could not be restored")
+    return
+end
+local shouldRun = restoredState["Auto Reconnect"] == true
+local env = _G
+if type(getgenv) == "function" then
+    local envOK, gotEnv = pcall(getgenv)
+    if envOK and type(gotEnv) == "table" then env = gotEnv end
+end
 if type(isfile) == "function" and type(readfile) == "function" then
-    local ok, content = pcall(readfile, %q)
-    if ok and type(content) == "string" then
-        local decodedOK, state = pcall(function() return HttpService:JSONDecode(content) end)
-        shouldRun = decodedOK and type(state) == "table" and state["Auto Reconnect"] == true
+    local existsOK, exists = pcall(isfile, %q)
+    if existsOK and exists then
+        local readOK, contents = pcall(readfile, %q)
+        if readOK and type(contents) == "string" then
+            local decodeOK, diskState = pcall(function() return HttpService:JSONDecode(contents) end)
+            if decodeOK and type(diskState) == "table" and type(diskState["Auto Reconnect"]) == "boolean" then
+                shouldRun = diskState["Auto Reconnect"]
+                restoredState = diskState
+            end
+        end
     end
 end
-if not shouldRun and type(getgenv) == "function" then
-    local ok, env = pcall(getgenv)
-    shouldRun = ok and type(env) == "table" and type(env.OnrushaAutoFarmState) == "table" and env.OnrushaAutoFarmState["Auto Reconnect"] == true
-end
 if not shouldRun then return end
-local u = %q
-local ok, src = pcall(function() return game:HttpGet(u) end)
-if ok and type(src) == "string" then
-    local f = loadstring(src)
-    if type(f) == "function" then f() end
+pcall(function() env.OnrushaAutoFarmState = restoredState end)
+if type(env.writefile) == "function" then
+    pcall(env.writefile, %q, HttpService:JSONEncode(restoredState))
 end
-]], TOGGLE_STATE_FILE, AUTOMATION_SCRIPT_URL)
+local url = %q
+if type(loadstring) ~= "function" then
+    warn("[Onrusha] Auto Reconnect: loadstring is unavailable after teleport")
+    return
+end
+local downloadOK, source = pcall(function() return game:HttpGet(url) end)
+if not downloadOK or type(source) ~= "string" or source == "" then
+    warn("[Onrusha] Auto Reconnect: failed to download script:", tostring(source))
+    return
+end
+local chunk, compileError = loadstring(source)
+if type(chunk) ~= "function" then
+    warn("[Onrusha] Auto Reconnect: script compilation failed:", tostring(compileError))
+    return
+end
+local runOK, runError = pcall(chunk)
+if not runOK then warn("[Onrusha] Auto Reconnect: script startup failed:", tostring(runError)) end
+]], stateJson, TOGGLE_STATE_FILE, TOGGLE_STATE_FILE, TOGGLE_STATE_FILE, AUTOMATION_SCRIPT_URL)
+
     local ok, err = pcall(queue, queuedCode)
-    if not ok then warn("[Onrusha] Auto Reconnect queue failed:", err) end
-    return ok
+    if not ok then
+        lastQueueAt = 0
+        warn("[Onrusha] Auto Reconnect queue failed:", err)
+        return false
+    end
+    return true
 end
 
 local LIBRARY_URL = "https://raw.githubusercontent.com/Andreusha1/OnrushaHub/refs/heads/main/script"
@@ -125,6 +166,29 @@ do
     local ok, result = pcall(function()
         local source = game:HttpGet(LIBRARY_URL)
         assert(type(source) == "string" and #source > 0, "Library source is empty")
+
+        local function replaceOnce(text, oldText, newText, label)
+            local first, last = string.find(text, oldText, 1, true)
+            assert(first, "KeyGate compatibility patch could not find " .. label)
+            return string.sub(text, 1, first - 1) .. newText .. string.sub(text, last + 1)
+        end
+
+        source = replaceOnce(
+            source,
+            'if result.valid == true then\n    return true, "valid", tonumber(result.expires_in) or 3600\nend',
+            'if result.valid == true then\n    return true, "valid", tonumber(result.expires_in) or 3600, result.permanent == true\nend',
+            "validation result handler"
+        )
+        source = replaceOnce(source, "local function finishKeyUnlock(key, expiresIn)", "local function finishKeyUnlock(key, expiresIn, isPermanent)", "unlock handler")
+        source = replaceOnce(
+            source,
+            "local secondsLeft = math.max(1, math.floor(tonumber(expiresIn) or 3600))\n\ntask.delay(secondsLeft, function()",
+            "if isPermanent then return end\n\n    local secondsLeft = math.max(1, math.floor(tonumber(expiresIn) or 3600))\n\n    task.delay(secondsLeft, function()",
+            "permanent expiry timer"
+        )
+        source = replaceOnce(source, "local callOK, valid, reason, expiresIn = pcall(validateKeyOnline, entered)", "local callOK, valid, reason, expiresIn, isPermanent = pcall(validateKeyOnline, entered)", "unlock validation result")
+        source = source:gsub("finishKeyUnlock%(entered, expiresIn%)", "finishKeyUnlock(entered, expiresIn, isPermanent)")
+
         local chunk, compileError = loadstring(source)
         assert(type(chunk) == "function", tostring(compileError or "Library compilation failed"))
         return chunk()
@@ -584,6 +648,20 @@ main:AddToggle("Auto Item", getToggleDefault("Auto Item", false), function(value
             return true
         end
 
+        local function MoveSmoothUnderground(root, targetPosition, depth)
+            if not root or not root.Parent then return false end
+            depth = math.max(tonumber(depth) or 18, 8)
+            local startPosition = root.Position
+            local undergroundY = math.min(startPosition.Y, targetPosition.Y) - depth
+            local downPosition = Vector3.new(startPosition.X, undergroundY, startPosition.Z)
+            local acrossPosition = Vector3.new(targetPosition.X, undergroundY, targetPosition.Z)
+            if not MoveSmooth(root, startPosition, downPosition) then return false end
+            if not AutoItem then return false end
+            if not MoveSmooth(root, downPosition, acrossPosition) then return false end
+            if not AutoItem then return false end
+            return MoveSmooth(root, acrossPosition, targetPosition)
+        end
+
         local function Worker()
             if workerRunning then return end
             workerRunning = true
@@ -648,7 +726,7 @@ main:AddToggle("Auto Item", getToggleDefault("Auto Item", false), function(value
                         end
                         AutoItemBusy = true
                         local pickupPosition = data.Part.Position + Vector3.new(0, AutoItemPickupHeight, 0)
-                        local reachedItem = MoveSmooth(root, root.Position, pickupPosition)
+                        local reachedItem = MoveSmoothUnderground(root, pickupPosition, 18)
                         if not reachedItem then
                             AutoItemBusy = false
                             if not AutoItem then break end
@@ -732,7 +810,7 @@ main:AddToggle("Auto Item", getToggleDefault("Auto Item", false), function(value
                             end
                             local startPos = root.Position
                             local targetPos = targetHole.Position + Vector3.new(0, AutoItemDropHeight, 0)
-                            local lowY = startPos.Y - 15
+                            local lowY = startPos.Y - 18
                             local down = Vector3.new(startPos.X, lowY, startPos.Z)
                             local lowTarget = Vector3.new(targetPos.X, lowY, targetPos.Z)
                             local moved = MoveSmooth(root, startPos, down)
@@ -1383,7 +1461,7 @@ end)
 
 ui:Notify({
     Title = "Onrusha loaded",
-    Description = "RightShift default key for toggles the UI. Configure controls in each tab.",
+    Description = "RightShift toggles the UI. Configure controls in each tab. Auto Reconnect needs a hosted script URL.",
     Type = "Success",
     Duration = 5
 })
