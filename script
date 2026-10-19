@@ -1,4 +1,8 @@
--- Prevent the script from starting multiple times in the same game server.
+local playerkickaffect = game:GetService("Players").LocalPlayer
+if game.GameId ~= 10767858548 then 
+    playerkickaffect:Kick("ITS SCRIPT FOR HOLE GAME")
+end
+
 local __OnrushaSharedEnv = _G
 if type(getgenv) == "function" then
     local __envOK, __envValue = pcall(getgenv)
