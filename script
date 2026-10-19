@@ -182,8 +182,8 @@ do
         source = replaceOnce(source, "local function finishKeyUnlock(key, expiresIn)", "local function finishKeyUnlock(key, expiresIn, isPermanent)", "unlock handler")
         source = replaceOnce(
             source,
-            "local secondsLeft = math.max(1, math.floor(tonumber(expiresIn) or 3600))\n\ntask.delay(secondsLeft, function()",
-            "if isPermanent then return end\n\n    local secondsLeft = math.max(1, math.floor(tonumber(expiresIn) or 3600))\n\n    task.delay(secondsLeft, function()",
+            "local secondsLeft = math.max(1, math.floor(tonumber(expiresIn) or 3600))",
+            "if isPermanent then return end\n\nlocal secondsLeft = math.max(1, math.floor(tonumber(expiresIn) or 3600))",
             "permanent expiry timer"
         )
         source = replaceOnce(source, "local callOK, valid, reason, expiresIn = pcall(validateKeyOnline, entered)", "local callOK, valid, reason, expiresIn, isPermanent = pcall(validateKeyOnline, entered)", "unlock validation result")
