@@ -1,3 +1,25 @@
+-- Prevent the script from starting multiple times in the same game server.
+local __OnrushaSharedEnv = _G
+if type(getgenv) == "function" then
+    local __envOK, __envValue = pcall(getgenv)
+    if __envOK and type(__envValue) == "table" then
+        __OnrushaSharedEnv = __envValue
+    end
+end
+local __OnrushaSessionKey = tostring(game.PlaceId) .. ":" .. tostring(game.JobId)
+local __OnrushaBootGuard = __OnrushaSharedEnv.__OnrushaHoleScriptBootGuard
+if type(__OnrushaBootGuard) == "table"
+    and __OnrushaBootGuard.session == __OnrushaSessionKey
+    and __OnrushaBootGuard.active == true then
+    warn("[Onrusha] Duplicate launch ignored; this script is already active in this server.")
+    return
+end
+__OnrushaBootGuard = {
+    session = __OnrushaSessionKey,
+    active = true
+}
+__OnrushaSharedEnv.__OnrushaHoleScriptBootGuard = __OnrushaBootGuard
+
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -1080,6 +1102,11 @@ local AutoReconnect = false
 local autoReconnectConnection
 local reconnectBusy = false
 local lastReconnectAttempt = 0
+local sharedReconnectState = __OnrushaSharedEnv.__OnrushaReconnectState
+if type(sharedReconnectState) ~= "table" or sharedReconnectState.session ~= __OnrushaSessionKey then
+    sharedReconnectState = { session = __OnrushaSessionKey, busy = false, lastAttempt = 0 }
+    __OnrushaSharedEnv.__OnrushaReconnectState = sharedReconnectState
+end
 
 local function isBanErrorMessage(message)
     local text = string.lower(tostring(message or ""))
@@ -1099,13 +1126,14 @@ end
 local function stopReconnectForBan(message)
     AutoReconnect = false
     reconnectBusy = false
+    sharedReconnectState.busy = false
     SavedToggleState["Auto Reconnect"] = false
     saveToggleState()
     warn("[Onrusha] Auto Reconnect disabled because the error looks like a ban/moderation message:", tostring(message))
 end
 
 local function tryReconnect(errorMessage)
-    if not AutoReconnect or reconnectBusy then
+    if not AutoReconnect or reconnectBusy or sharedReconnectState.busy then
         return
     end
 
@@ -1115,11 +1143,14 @@ local function tryReconnect(errorMessage)
     end
 
     local now = os.clock()
-    if now - lastReconnectAttempt < 4 then
+    local sharedLastAttempt = tonumber(sharedReconnectState.lastAttempt) or 0
+    if now - math.max(lastReconnectAttempt, sharedLastAttempt) < 4 then
         return
     end
 
     lastReconnectAttempt = now
+    sharedReconnectState.lastAttempt = now
+    sharedReconnectState.busy = true
     reconnectBusy = true
     saveToggleState()
     queueReloadOnTeleport()
@@ -1128,6 +1159,7 @@ local function tryReconnect(errorMessage)
         task.wait(1)
         if not AutoReconnect then
             reconnectBusy = false
+            sharedReconnectState.busy = false
             return
         end
 
@@ -1138,6 +1170,7 @@ local function tryReconnect(errorMessage)
         if not ok then
             warn("[Onrusha] Reconnect attempt failed:", tostring(err))
             reconnectBusy = false
+            sharedReconnectState.busy = false
             task.delay(4, function()
                 if AutoReconnect then
                     tryReconnect("network retry")
@@ -1150,6 +1183,7 @@ local function tryReconnect(errorMessage)
         task.delay(15, function()
             if AutoReconnect and reconnectBusy then
                 reconnectBusy = false
+                sharedReconnectState.busy = false
                 tryReconnect("teleport timeout retry")
             end
         end)
@@ -1187,6 +1221,7 @@ TeleportService.TeleportInitFailed:Connect(function(failedPlayer, teleportResult
     end
 
     reconnectBusy = false
+    sharedReconnectState.busy = false
     task.delay(4.5, function()
         if AutoReconnect then
             tryReconnect(errorMessage or tostring(teleportResult))
@@ -1197,6 +1232,7 @@ end)
 main:AddToggle("Auto Reconnect", getToggleDefault("Auto Reconnect", false), function(value)
     AutoReconnect = value
     reconnectBusy = false
+    sharedReconnectState.busy = false
     if autoReconnectConnection then
         autoReconnectConnection:Disconnect()
         autoReconnectConnection = nil
@@ -1218,6 +1254,11 @@ main:AddToggle("Auto Reconnect", getToggleDefault("Auto Reconnect", false), func
         end
         saveToggleState()
         queueReloadOnTeleport()
+        -- The next place/server should be allowed to run the queued copy.
+        -- Other queued copies will be rejected by the same-session boot guard.
+        if type(__OnrushaBootGuard) == "table" then
+            __OnrushaBootGuard.active = false
+        end
     end)
 end, "Reconnect on connection errors; skips detected ban messages.")
 
