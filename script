@@ -256,7 +256,7 @@ local created, ui = pcall(function()
             Enabled = true,
             Key = key,
             ValidateUrl = VALIDATE_URL,
-            DiscordUrl = "https://discord.gg/NWyfNUzTF"
+            DiscordUrl = "https://discord.gg/dn85ZZ3y7c"
         }
     })
 end)
